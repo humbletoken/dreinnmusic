@@ -1,0 +1,29 @@
+services:
+  dreinn-music:
+    build: .
+    image: dreinn-music:1.0.0
+    container_name: dreinn-music
+    restart: unless-stopped
+    # Secrets are injected at runtime - .env is NOT baked into the image
+    env_file:
+      - .env
+    environment:
+      # inside the container the database always lives on the volume
+      DB_PATH: /data/dreinn.db
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - dreinn-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  dreinn-data:
+    name: dreinn-data
