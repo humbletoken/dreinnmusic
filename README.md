@@ -115,7 +115,8 @@ docker compose up -d --build
 * `.env` **не попадает в образ** — он исключён в `.dockerignore` и подключается
   через `env_file` во время запуска;
 * база лежит на именованном volume `dreinn-data` (`/data/dreinn.db`) и переживает
-  пересборку образа;
+  пересборку образа; контейнер стартует под root только чтобы выдать права на
+  этот каталог, после чего `docker-entrypoint.sh` уходит под пользователя `node`;
 * порт `3000` проброшен наружу, есть healthcheck на `/healthz`.
 
 Ручная сборка без compose:
@@ -200,6 +201,7 @@ docker run -d --name dreinn-music -p 3000:3000 \
 │       ├── views-profile.js# профиль, история, коллекции, сравнение, Spotify
 │       └── app.js          # роутер и запуск
 ├── Dockerfile
+├── docker-entrypoint.sh      # правит владельца тома и уходит под пользователя node
 ├── docker-compose.yml
 ├── .dockerignore
 ├── .env.example
@@ -249,7 +251,49 @@ docker run -d --name dreinn-music -p 3000:3000 \
 
 ---
 
-## 9. Лицензии и источники данных
+## 9. Если что-то не запускается
+
+### `SqliteError: unable to open database file` (`SQLITE_CANTOPEN`)
+
+Каталог с базой принадлежит `root`, а приложение работает под пользователем
+`node` (uid 1000). Обычно так бывает с томом, созданным более ранней версией
+образа, или с bind-mount с хоста. Начиная с этой версии `docker-entrypoint.sh`
+чинит права автоматически при старте, поэтому достаточно пересобрать образ:
+
+```bash
+docker compose up -d --build
+```
+
+Если вы запускаете контейнер своим способом (или принудительно через
+`--user`), права можно выдать вручную:
+
+```bash
+# существующему тому
+docker run --rm -v dreinn-data:/data alpine chown -R 1000:1000 /data
+
+# либо пересоздать пустой том (данные будут потеряны)
+docker compose down && docker volume rm dreinn-data && docker compose up -d --build
+```
+
+Приложение печатает при такой ошибке путь к файлу, владельца каталога, uid
+процесса и эти же команды — гадать не придётся.
+
+### Бот не отвечает
+
+* проверьте `BOT_TOKEN` и логи: `docker compose logs -f dreinn-music`;
+* при `BOT_MODE=webhook` нужен публичный HTTPS-адрес в `PUBLIC_URL`
+  и совпадающий `WEBHOOK_SECRET`;
+* Mini App не открывается из кнопки — Telegram требует HTTPS в `PUBLIC_URL`.
+
+### Custom emoji приходят обычными
+
+Telegram разрешает ботам premium-эмодзи только при купленном на Fragment
+username. Приложение само определяет отказ и переключается на обычные эмодзи;
+принудительно — `USE_CUSTOM_EMOJI=false`.
+
+---
+
+## 10. Лицензии и источники данных
 
 * Каталог, обложки и 30-секундные превью — Deezer API, используются по их условиям.
 * Spotify — только метаданные пользователя через официальный Web API.

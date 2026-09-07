@@ -439,9 +439,58 @@ function computeScore(type, input, tracksCtx) {
  *    Файл БД живёт на docker volume (DB_PATH=/data/dreinn.db).
  * ========================================================================== */
 
-fs.mkdirSync(path.dirname(path.resolve(CFG.dbPath)), { recursive: true });
+const DB_FILE = path.resolve(CFG.dbPath);
+const DB_DIR = path.dirname(DB_FILE);
 
-const db = new Database(path.resolve(CFG.dbPath));
+/**
+ * Открыть SQLite и объяснить человеку, что делать, если каталог недоступен
+ * (типичный случай — docker volume, созданный от root, при запуске под node).
+ */
+function openDatabase() {
+  try {
+    fs.mkdirSync(DB_DIR, { recursive: true });
+    fs.accessSync(DB_DIR, fs.constants.W_OK);
+    return new Database(DB_FILE);
+  } catch (err) {
+    const permissionIssue = ['SQLITE_CANTOPEN', 'EACCES', 'EPERM', 'EROFS', 'ENOENT'].includes(err.code);
+    if (!permissionIssue) throw err;
+
+    let owner = 'неизвестно';
+    try {
+      const stat = fs.statSync(DB_DIR);
+      owner = `uid=${stat.uid} gid=${stat.gid}`;
+    } catch {
+      owner = 'каталог не существует';
+    }
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 'n/a';
+    const gid = typeof process.getgid === 'function' ? process.getgid() : 'n/a';
+
+    console.error([
+      '',
+      '  ✗ Не удалось открыть базу данных SQLite.',
+      '',
+      `    файл          : ${DB_FILE}`,
+      `    каталог       : ${DB_DIR} (${owner})`,
+      `    процесс       : uid=${uid} gid=${gid}`,
+      `    причина       : ${err.code || err.message}`,
+      '',
+      '  Чаще всего каталог с базой принадлежит root, а приложение работает',
+      '  под пользователем node. Как починить:',
+      '',
+      '    # 1. выдать права на существующий docker-том',
+      '    docker run --rm -v dreinn-data:/data alpine chown -R 1000:1000 /data',
+      '',
+      '    # 2. или пересоздать пустой том и запустить заново',
+      '    docker compose down && docker volume rm dreinn-data && docker compose up -d --build',
+      '',
+      '  Если база лежит не в Docker, проверьте DB_PATH и права на каталог.',
+      ''
+    ].join('\n'));
+    process.exit(1);
+  }
+}
+
+const db = openDatabase();
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
