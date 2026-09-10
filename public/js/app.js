@@ -220,6 +220,9 @@
     global.TG.ready();
     global.TG.applyTheme();
 
+    // статическая разметка: нижняя навигация и мини-плеер
+    global.Icons.hydrate(document);
+
     if (global.Telegram && global.Telegram.WebApp) {
       global.Telegram.WebApp.onEvent('themeChanged', function () { global.TG.applyTheme(); });
     }
@@ -244,9 +247,10 @@
       })
       .catch(function (err) {
         console.error('bootstrap failed', err);
+        var reason = err && err.payload && err.payload.message;
         appRoot.innerHTML = errorScreen(
           err && err.status === 401
-            ? 'Приложение открывается только внутри Telegram. Запусти его через бота.'
+            ? (reason || 'Приложение открывается только внутри Telegram. Запусти его через бота.')
             : 'Сервер недоступен. Попробуй ещё раз через минуту.'
         );
         global.Icons.hydrate(appRoot);

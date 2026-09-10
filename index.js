@@ -2835,52 +2835,97 @@ app.use((req, res, next) => {
 
 /* --- авторизация через Telegram initData ----------------------------------- */
 
+/**
+ * Строка проверки: все поля кроме hash, отсортированные по ключу.
+ * Telegram оставляет signature внутри строки при HMAC-проверке, но некоторые
+ * клиенты/прокси ведут себя иначе, поэтому проверяем оба варианта.
+ */
+function initDataCheckString(params, dropSignature) {
+  return [...params.entries()]
+    .filter(([key]) => key !== 'hash' && !(dropSignature && key === 'signature'))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+}
+
+function initDataHashMatches(dataCheckString, hash) {
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(CFG.botToken).digest();
+  const calculated = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+  if (calculated.length !== hash.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(calculated, 'hex'), Buffer.from(hash, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Проверка initData Telegram Mini App.
+ * @returns {{ok: true, user: object, startParam: string|null, authDate: number}
+ *          | {ok: false, reason: string}}
+ */
 function validateInitData(initData) {
-  if (!initData || !CFG.botToken) return null;
+  if (!initData) return { ok: false, reason: 'no_init_data' };
+  if (!CFG.botToken) return { ok: false, reason: 'bot_token_not_set' };
+
   let params;
   try {
     params = new URLSearchParams(initData);
   } catch {
-    return null;
+    return { ok: false, reason: 'malformed_init_data' };
   }
 
   const hash = params.get('hash');
-  if (!hash) return null;
-  params.delete('hash');
-  params.delete('signature');
+  if (!hash) return { ok: false, reason: 'no_hash' };
 
-  const dataCheckString = [...params.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, value]) => `${key}=${value}`)
-    .join('\n');
+  const matches =
+    initDataHashMatches(initDataCheckString(params, false), hash) ||
+    initDataHashMatches(initDataCheckString(params, true), hash);
 
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(CFG.botToken).digest();
-  const signature = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-
-  if (signature.length !== hash.length) return null;
-  if (!crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(hash, 'hex'))) return null;
+  if (!matches) return { ok: false, reason: 'hash_mismatch' };
 
   const authDate = toInt(params.get('auth_date'), 0);
-  if (!authDate || now() - authDate > 86400) return null;
+  if (!authDate) return { ok: false, reason: 'no_auth_date' };
+  if (now() - authDate > 86400) return { ok: false, reason: 'expired' };
 
   try {
     const user = JSON.parse(params.get('user') || 'null');
-    if (!user || !user.id) return null;
-    return { user, startParam: params.get('start_param') || null, authDate };
+    if (!user || !user.id) return { ok: false, reason: 'no_user' };
+    return { ok: true, user, startParam: params.get('start_param') || null, authDate };
   } catch {
-    return null;
+    return { ok: false, reason: 'bad_user_payload' };
   }
 }
+
+const AUTH_HINTS = {
+  bot_token_not_set: 'BOT_TOKEN не задан на сервере — Mini App не может проверить подпись',
+  hash_mismatch: 'подпись initData не сходится: скорее всего BOT_TOKEN сервера не от того бота, через которого открыт Mini App',
+  expired: 'initData старше 24 часов — переоткрой приложение',
+  no_init_data: 'запрос без initData (открыто не из Telegram)',
+  malformed_init_data: 'initData не разбирается',
+  no_hash: 'в initData нет поля hash',
+  no_auth_date: 'в initData нет auth_date',
+  no_user: 'в initData нет пользователя',
+  bad_user_payload: 'поле user в initData повреждено'
+};
+
+let lastAuthWarning = 0;
 
 function authMiddleware(req, res, next) {
   const initData = req.get('X-Init-Data') || req.query.initData || '';
   const parsed = validateInitData(initData);
 
-  if (parsed) {
+  if (parsed.ok) {
     req.tgUser = parsed.user;
     req.startParam = parsed.startParam;
     req.user = upsertUser(parsed.user);
     return next();
+  }
+
+  // не спамим лог: одно предупреждение раз в 10 секунд
+  if (initData && Date.now() - lastAuthWarning > 10000) {
+    lastAuthWarning = Date.now();
+    log.warn(`Авторизация Mini App отклонена (${parsed.reason}): ${AUTH_HINTS[parsed.reason] || ''}`);
   }
 
   if (CFG.devMode) {
@@ -2896,7 +2941,11 @@ function authMiddleware(req, res, next) {
     return next();
   }
 
-  return res.status(401).json({ error: 'unauthorized', message: 'Открой приложение через Telegram' });
+  return res.status(401).json({
+    error: 'unauthorized',
+    reason: parsed.reason,
+    message: AUTH_HINTS[parsed.reason] || 'Открой приложение через Telegram'
+  });
 }
 
 const wrap = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -3532,7 +3581,9 @@ app.get('/healthz', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), {
   maxAge: '7d',
   setHeaders(res, filePath) {
-    if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+    // разметку и код клиента всегда перепроверяем по ETag, иначе после обновления
+    // приложения у пользователей неделю живёт старый Mini App
+    if (/\.(html|js|css)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
   }
 }));
 

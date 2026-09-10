@@ -278,6 +278,22 @@ docker compose down && docker volume rm dreinn-data && docker compose up -d --bu
 Приложение печатает при такой ошибке путь к файлу, владельца каталога, uid
 процесса и эти же команды — гадать не придётся.
 
+### Mini App пишет «Что-то пошло не так» при запуске из Telegram
+
+Сервер отклонил подпись `initData`. Точная причина видна в ответе API и в логах
+(`docker compose logs -f dreinn-music`), сообщение уже переведено на человеческий:
+
+| reason | что делать |
+|---|---|
+| `hash_mismatch` | `BOT_TOKEN` на сервере не от того бота, через которого открыт Mini App |
+| `bot_token_not_set` | `BOT_TOKEN` не передан в контейнер (проверьте `.env` и `env_file`) |
+| `expired` | `initData` старше 24 часов — просто переоткройте приложение |
+| `no_init_data` | приложение открыто не из Telegram (в браузере поможет `DEV_MODE=true`) |
+
+После обновления кода обязательно пересоберите образ: клиентские файлы отдаются
+с `Cache-Control: no-cache` и перепроверяются по ETag, но старый образ продолжит
+отдавать старый `index.js`.
+
 ### Бот не отвечает
 
 * проверьте `BOT_TOKEN` и логи: `docker compose logs -f dreinn-music`;
