@@ -186,7 +186,25 @@
     spotifyPlaylists: function () { return API.get('/spotify/playlists'); },
     spotifyPlaylistTracks: function (id, offset) { return API.get('/spotify/playlists/' + id + '/tracks', { offset: offset }); },
     spotifyImport: function (playlistId) { return API.post('/spotify/import', { playlistId: playlistId }); },
-    spotifyExport: function (payload) { return API.post('/spotify/export', payload); }
+    spotifyExport: function (payload) { return API.post('/spotify/export', payload); },
+
+    admin: {
+      overview: function () { return API.get('/admin/overview'); },
+      settings: function () { return API.get('/admin/settings'); },
+      saveSpotify: function (payload) { return API.post('/admin/settings/spotify', payload); },
+      resetSpotify: function () { return API.del('/admin/settings/spotify'); },
+      saveSettings: function (payload) { return API.post('/admin/settings', payload); },
+      clearCache: function () { return API.post('/admin/cache/clear', {}); },
+      refreshDaily: function () { return API.post('/admin/daily/refresh', {}); },
+      users: function (q) { return API.get('/admin/users', { q: q }); },
+      ban: function (id, banned, reason) { return API.post('/admin/users/' + id + '/ban', { banned: banned, reason: reason }); },
+      deleteRatings: function (id) { return API.del('/admin/users/' + id + '/ratings'); },
+      events: function (limit) { return API.get('/admin/events', { limit: limit }); },
+      bot: function () { return API.get('/admin/bot'); },
+      botSetup: function () { return API.post('/admin/bot/setup', {}); },
+      broadcast: function (text, testOnly) { return API.post('/admin/broadcast', { text: text, testOnly: testOnly }); },
+      broadcastState: function () { return API.get('/admin/broadcast'); }
+    }
   };
 
   global.TG = TG;

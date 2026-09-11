@@ -75,6 +75,78 @@ CFG.spotifyRedirectUri =
   (process.env.SPOTIFY_REDIRECT_URI || '').trim() || `${CFG.publicUrl}/spotify/callback`;
 CFG.spotifyEnabled = Boolean(CFG.spotifyClientId && CFG.spotifyClientSecret);
 CFG.botEnabled = Boolean(CFG.botToken);
+CFG.timezone = (process.env.APP_TIMEZONE || 'Europe/Moscow').trim();
+CFG.spotifySource = CFG.spotifyEnabled ? 'env' : 'none';
+
+/** Значения из .env — чтобы админка могла «сбросить к .env». */
+const ENV_SPOTIFY = Object.freeze({
+  clientId: CFG.spotifyClientId,
+  clientSecret: CFG.spotifyClientSecret,
+  redirectUri: CFG.spotifyRedirectUri
+});
+
+/* --- время и часовой пояс -------------------------------------------------- */
+
+function validTimezone(tz) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (!validTimezone(CFG.timezone)) {
+  console.warn(`[!] APP_TIMEZONE="${CFG.timezone}" не распознан, использую Europe/Moscow`);
+  CFG.timezone = validTimezone('Europe/Moscow') ? 'Europe/Moscow' : 'UTC';
+}
+
+/** Компоненты даты/времени в заданном часовом поясе. */
+function tzParts(date = new Date(), timeZone = CFG.timezone) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  const parts = {};
+  for (const p of fmt.formatToParts(date)) if (p.type !== 'literal') parts[p.type] = parseInt(p.value, 10);
+  if (parts.hour === 24) parts.hour = 0;
+  return parts;
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** 'YYYY-MM-DD' по локальному времени сервиса (по умолчанию Москва). */
+function localDateKey(date = new Date(), timeZone = CFG.timezone) {
+  const p = tzParts(date, timeZone);
+  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
+}
+
+function localTimeString(date = new Date(), timeZone = CFG.timezone) {
+  const p = tzParts(date, timeZone);
+  return `${pad2(p.hour)}:${pad2(p.minute)}`;
+}
+
+/** Секунд до ближайших 00:00 в часовом поясе сервиса. */
+function secondsUntilMidnight(timeZone = CFG.timezone) {
+  const p = tzParts(new Date(), timeZone);
+  const elapsed = p.hour * 3600 + p.minute * 60 + p.second;
+  return Math.max(60, 86400 - elapsed);
+}
+
+/** Начало текущих локальных суток (unix). */
+function localDayStart(timeZone = CFG.timezone) {
+  const p = tzParts(new Date(), timeZone);
+  return Math.floor(Date.now() / 1000) - (p.hour * 3600 + p.minute * 60 + p.second);
+}
+
+/** Смещение часового пояса в секундах (для DATE() в SQLite). */
+function tzOffsetSeconds(timeZone = CFG.timezone) {
+  const nowDate = new Date();
+  const p = tzParts(nowDate, timeZone);
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return Math.round((asUtc - Math.floor(nowDate.getTime() / 1000) * 1000) / 1000);
+}
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const LOG_LEVEL = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? 2;
@@ -656,6 +728,68 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/* --- настройки, задаваемые из админ-панели --------------------------------- */
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at INTEGER NOT NULL
+);
+`);
+
+function ensureColumn(table, column, ddl) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+}
+
+ensureColumn('users', 'is_banned', 'INTEGER DEFAULT 0');
+ensureColumn('users', 'banned_reason', 'TEXT');
+
+function getSetting(key, fallback = null) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  if (!row) return fallback;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return fallback;
+  }
+}
+
+function setSetting(key, value) {
+  db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+    .run(key, JSON.stringify(value), now());
+}
+
+const deleteSetting = (key) => db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+
+/** Настройки из БД перекрывают .env: Spotify-ключи, custom emoji, часовой пояс. */
+function applyStoredSettings() {
+  const sp = getSetting('spotify');
+  if (sp && sp.clientId && sp.clientSecret) {
+    CFG.spotifyClientId = sp.clientId;
+    CFG.spotifyClientSecret = sp.clientSecret;
+    CFG.spotifyRedirectUri = sp.redirectUri || ENV_SPOTIFY.redirectUri;
+    CFG.spotifySource = 'admin';
+  } else {
+    CFG.spotifyClientId = ENV_SPOTIFY.clientId;
+    CFG.spotifyClientSecret = ENV_SPOTIFY.clientSecret;
+    CFG.spotifyRedirectUri = ENV_SPOTIFY.redirectUri;
+    CFG.spotifySource = ENV_SPOTIFY.clientId && ENV_SPOTIFY.clientSecret ? 'env' : 'none';
+  }
+  CFG.spotifyEnabled = Boolean(CFG.spotifyClientId && CFG.spotifyClientSecret);
+
+  const emoji = getSetting('use_custom_emoji');
+  if (emoji !== null && emoji !== undefined) CFG.useCustomEmoji = Boolean(emoji);
+
+  const tz = getSetting('timezone');
+  if (tz && validTimezone(tz)) CFG.timezone = tz;
+}
+
+applyStoredSettings();
+
+const isAdmin = (userId) => CFG.adminIds.includes(toInt(userId, 0));
+
 /* --- пользователи ---------------------------------------------------------- */
 
 const stmtInsertUser = db.prepare(`
@@ -797,13 +931,20 @@ async function fetchJson(url, options = {}, { timeout = 12000, retries = 1 } = {
  * ========================================================================== */
 
 const dz = {
-  async call(endpoint, params = {}, ttl = CFG.cacheTtl) {
+  /**
+   * @param opts.daily  подборка «дня»: ключ кэша привязан к московской дате,
+   *                    а TTL истекает ровно в 00:00 по часовому поясу сервиса
+   */
+  async call(endpoint, params = {}, ttl = CFG.cacheTtl, opts = {}) {
     const query = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
     }
     const qs = query.toString();
-    const key = `dz:${endpoint}?${qs}`;
+    const key = opts.daily
+      ? `dz:${endpoint}?${qs}@${localDateKey()}`
+      : `dz:${endpoint}?${qs}`;
+    if (opts.daily) ttl = secondsUntilMidnight();
     const cached = cacheGet(key);
     if (cached) return cached;
 
@@ -828,11 +969,11 @@ const dz = {
   artistTop: (id, limit = 15) => dz.call(`/artist/${id}/top`, { limit }, 3600),
   artistAlbums: (id, limit = 25) => dz.call(`/artist/${id}/albums`, { limit }, 3600),
   artistRelated: (id, limit = 12) => dz.call(`/artist/${id}/related`, { limit }, 86400),
-  chartTracks: (limit = 30) => dz.call('/chart/0/tracks', { limit }, 3600),
-  chartAlbums: (limit = 30) => dz.call('/chart/0/albums', { limit }, 3600),
-  chartArtists: (limit = 30) => dz.call('/chart/0/artists', { limit }, 3600),
-  editorialReleases: (limit = 30) => dz.call('/editorial/0/releases', { limit }, 3600),
-  editorialSelection: (limit = 30) => dz.call('/editorial/0/selection', { limit }, 3600),
+  chartTracks: (limit = 30) => dz.call('/chart/0/tracks', { limit }, 0, { daily: true }),
+  chartAlbums: (limit = 30) => dz.call('/chart/0/albums', { limit }, 0, { daily: true }),
+  chartArtists: (limit = 30) => dz.call('/chart/0/artists', { limit }, 0, { daily: true }),
+  editorialReleases: (limit = 30) => dz.call('/editorial/0/releases', { limit }, 0, { daily: true }),
+  editorialSelection: (limit = 30) => dz.call('/editorial/0/selection', { limit }, 0, { daily: true }),
   genres: () => dz.call('/genre', {}, 86400),
   genreArtists: (id, limit = 25) => dz.call(`/genre/${id}/artists`, { limit }, 86400)
 };
@@ -1495,9 +1636,9 @@ function userStats(userId) {
   const recent = db.prepare('SELECT * FROM ratings WHERE user_id = ? ORDER BY updated_at DESC LIMIT 5').all(userId).map(ratingRow);
 
   const streak = db.prepare(`
-    SELECT COUNT(DISTINCT DATE(updated_at, 'unixepoch')) AS days
+    SELECT COUNT(DISTINCT DATE(updated_at + ?, 'unixepoch')) AS days
     FROM ratings WHERE user_id = ? AND updated_at > ?
-  `).get(userId, now() - 30 * 86400).days;
+  `).get(tzOffsetSeconds(), userId, now() - 30 * 86400).days;
 
   const favorites = db.prepare('SELECT COUNT(*) AS c FROM favorites WHERE user_id = ?').get(userId).c;
   const collections = db.prepare('SELECT COUNT(*) AS c FROM collections WHERE user_id = ?').get(userId).c;
@@ -1971,63 +2112,9 @@ function ratedIdSet(userId, type = 'track') {
   return new Set(rows.map((r) => r.item_id));
 }
 
-/**
- * Рекомендации: берём артистов, которых пользователь оценил высоко,
- * тянем «похожих» из Deezer и их топ-треки, исключая уже оценённое.
- */
-async function recommendations(userId, limit = 18) {
-  const seeds = db.prepare(`
-    SELECT artist_id, artist, AVG(final_score) AS avg_final, COUNT(*) AS count
-    FROM ratings
-    WHERE user_id = ? AND artist_id IS NOT NULL
-    GROUP BY artist_id
-    HAVING avg_final >= 50
-    ORDER BY avg_final DESC, count DESC
-    LIMIT 6
-  `).all(userId);
-
-  const rated = ratedIdSet(userId, 'track');
-  const results = [];
-  const seen = new Set();
-
-  for (const seed of seeds) {
-    try {
-      const related = await dz.artistRelated(seed.artist_id, 6);
-      const artists = normList(related, normArtist);
-      for (const artist of artists.slice(0, 3)) {
-        const top = await dz.artistTop(artist.id, 6);
-        for (const track of normList(top, normTrack)) {
-          if (rated.has(track.id) || seen.has(track.id)) continue;
-          seen.add(track.id);
-          results.push({
-            ...track,
-            reason: `Похоже на ${seed.artist}`,
-            reasonArtist: seed.artist,
-            seedScore: round1(seed.avg_final)
-          });
-        }
-      }
-    } catch (err) {
-      log.debug('recommendation seed failed', err.message);
-    }
-    if (results.length >= limit * 1.5) break;
-  }
-
-  if (results.length < limit) {
-    try {
-      const chart = await dz.chartTracks(40);
-      for (const track of normList(chart, normTrack)) {
-        if (rated.has(track.id) || seen.has(track.id)) continue;
-        seen.add(track.id);
-        results.push({ ...track, reason: 'Сейчас в чарте', reasonArtist: null });
-        if (results.length >= limit) break;
-      }
-    } catch (err) {
-      log.debug('chart fallback failed', err.message);
-    }
-  }
-
-  return shuffle(results).slice(0, limit);
+function ratedArtistIdSet(userId) {
+  const rows = db.prepare('SELECT DISTINCT artist_id FROM ratings WHERE user_id = ? AND artist_id IS NOT NULL').all(userId);
+  return new Set(rows.map((r) => r.artist_id));
 }
 
 function shuffle(array) {
@@ -2039,68 +2126,263 @@ function shuffle(array) {
   return arr;
 }
 
+/** Не даём одному артисту занять больше maxRun позиций подряд. */
+function interleave(list, key, maxRun = 2) {
+  const out = [];
+  const pending = list.slice();
+  while (pending.length) {
+    let idx = pending.findIndex((item) => {
+      const tail = out.slice(-maxRun);
+      return !(tail.length === maxRun && tail.every((x) => x[key] && x[key] === item[key]));
+    });
+    if (idx < 0) idx = 0;
+    out.push(pending.splice(idx, 1)[0]);
+  }
+  return out;
+}
+
+/** Вес семени: низкие оценки — не сигнал «хочу ещё такого». */
+function seedWeight(avg, count) {
+  if (avg < 40) return 0;
+  return Math.round(avg - 30 + Math.min(count, 5) * 4);
+}
+
+/**
+ * Семена вкуса: артисты и жанры, которые пользователь оценивал
+ * (плюс артисты из любимого).
+ */
+function tasteSeeds(userId) {
+  const artists = db.prepare(`
+    SELECT artist_id, MAX(artist) AS artist, AVG(final_score) AS avg_final,
+           COUNT(*) AS cnt, MAX(updated_at) AS last_at
+    FROM ratings
+    WHERE user_id = ? AND artist_id IS NOT NULL
+    GROUP BY artist_id
+    ORDER BY (AVG(final_score) + MIN(COUNT(*), 5) * 4) DESC, MAX(updated_at) DESC
+    LIMIT 12
+  `).all(userId).map((r) => ({
+    id: r.artist_id,
+    name: r.artist,
+    avg: round1(r.avg_final),
+    count: r.cnt,
+    weight: seedWeight(r.avg_final, r.cnt)
+  })).filter((a) => a.weight > 0);
+
+  const favArtists = db.prepare(
+    'SELECT DISTINCT artist_id, artist FROM favorites WHERE user_id = ? AND artist_id IS NOT NULL ORDER BY created_at DESC LIMIT 6'
+  ).all(userId);
+  for (const f of favArtists) {
+    if (!artists.some((a) => a.id === f.artist_id)) {
+      artists.push({ id: f.artist_id, name: f.artist, avg: 60, count: 0, weight: 36, fromFavorites: true });
+    }
+  }
+
+  const genres = db.prepare(`
+    SELECT genre, AVG(final_score) AS avg_final, COUNT(*) AS cnt
+    FROM ratings
+    WHERE user_id = ? AND genre IS NOT NULL AND genre != '' AND final_score >= 40
+    GROUP BY LOWER(genre)
+    ORDER BY cnt DESC, avg_final DESC
+    LIMIT 4
+  `).all(userId).map((r) => ({ name: r.genre, avg: round1(r.avg_final), count: r.cnt }));
+
+  return { artists: artists.sort((a, b) => b.weight - a.weight).slice(0, 8), genres };
+}
+
+/** Индекс жанров Deezer: имя (в нижнем регистре) -> id. */
+async function genreIndexByName() {
+  const cached = cacheGet('dz:genre-index');
+  if (cached) return new Map(Object.entries(cached));
+  const res = await dz.genres();
+  const map = {};
+  for (const g of (res && res.data) || []) map[String(g.name).toLowerCase()] = g.id;
+  cacheSet('dz:genre-index', map, 86400);
+  return new Map(Object.entries(map));
+}
+
+/**
+ * Движок подборок. Три источника кандидатов:
+ *   1. «Ещё от X»     — неоценённые топ-треки артистов, которых пользователь оценивал
+ *   2. «Похоже на X»  — related-артисты Deezer и их топ-треки
+ *   3. «В жанре Y»    — артисты любимых жанров
+ * Кандидаты взвешиваются оценками пользователя, дедуплицируются,
+ * уже оценённое исключается. Результат кэшируется на 30 минут.
+ */
+async function recommendationEngine(userId) {
+  const stamp = db.prepare('SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), 0) AS m FROM ratings WHERE user_id = ?').get(userId);
+  const favStamp = db.prepare('SELECT COUNT(*) AS c FROM favorites WHERE user_id = ?').get(userId).c;
+  const cacheKey = `reco:${userId}:${stamp.c}:${stamp.m}:${favStamp}:${localDateKey()}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const seeds = tasteSeeds(userId);
+  const rated = ratedIdSet(userId, 'track');
+  const ratedArtists = ratedArtistIdSet(userId);
+  const tracks = new Map();
+  const artists = new Map();
+
+  const addTrack = (track, reason, score, seed) => {
+    if (!track || rated.has(track.id)) return;
+    const total = score + (track.preview ? 6 : 0) + Math.random() * 4;
+    const existing = tracks.get(track.id);
+    if (existing && existing.score >= total) return;
+    tracks.set(track.id, { ...track, reason, reasonArtist: seed || null, score: round1(total) });
+  };
+
+  const addArtist = (artist, reason, score) => {
+    if (!artist || ratedArtists.has(artist.id)) return;
+    const total = score + Math.random() * 4;
+    const existing = artists.get(artist.id);
+    if (existing && existing.score >= total) return;
+    artists.set(artist.id, { ...artist, reason, score: round1(total) });
+  };
+
+  // 1. ещё от оценённых артистов
+  await Promise.all(seeds.artists.map(async (seed) => {
+    try {
+      const top = normList(await dz.artistTop(seed.id, 12), normTrack);
+      top.filter((t) => !rated.has(t.id)).slice(0, 4)
+        .forEach((t, i) => addTrack(t, `Ещё от ${seed.name}`, seed.weight + 12 - i * 2, seed.name));
+    } catch (err) {
+      log.debug('reco: artistTop failed', err.message);
+    }
+  }));
+
+  // 2. похожие артисты
+  await Promise.all(seeds.artists.slice(0, 6).map(async (seed) => {
+    try {
+      const related = normList(await dz.artistRelated(seed.id, 8), normArtist);
+      related.forEach((a, i) => addArtist(a, `Похож на ${seed.name}`, seed.weight - i * 2));
+      for (const artist of related.slice(0, 3)) {
+        try {
+          const top = normList(await dz.artistTop(artist.id, 6), normTrack);
+          top.slice(0, 3).forEach((t, i) => addTrack(t, `Похоже на ${seed.name}`, seed.weight - 4 - i * 2, seed.name));
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (err) {
+      log.debug('reco: related failed', err.message);
+    }
+  }));
+
+  // 3. любимые жанры
+  if (seeds.genres.length) {
+    try {
+      const genreIndex = await genreIndexByName();
+      await Promise.all(seeds.genres.map(async (genre) => {
+        const genreId = genreIndex.get(String(genre.name).toLowerCase());
+        if (!genreId) return;
+        try {
+          const pool = shuffle(normList(await dz.genreArtists(genreId, 30), normArtist))
+            .filter((a) => !ratedArtists.has(a.id))
+            .slice(0, 4);
+          pool.forEach((a) => addArtist(a, `Жанр: ${genre.name}`, Math.max(8, genre.avg - 24)));
+          for (const artist of pool.slice(0, 3)) {
+            try {
+              const top = normList(await dz.artistTop(artist.id, 5), normTrack);
+              top.slice(0, 2).forEach((t, i) => addTrack(t, `В жанре ${genre.name}`, Math.max(4, genre.avg - 26 - i * 2), null));
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }));
+    } catch (err) {
+      log.debug('reco: genres failed', err.message);
+    }
+  }
+
+  const result = {
+    tracks: interleave([...tracks.values()].sort((a, b) => b.score - a.score), 'artistId', 2),
+    artists: [...artists.values()].sort((a, b) => b.score - a.score),
+    seeds: {
+      artists: seeds.artists.map((a) => ({ id: a.id, name: a.name, avg: a.avg, count: a.count })),
+      genres: seeds.genres
+    },
+    hasSeeds: seeds.artists.length > 0 || seeds.genres.length > 0,
+    builtAt: now()
+  };
+
+  cacheSet(cacheKey, result, 1800);
+  return result;
+}
+
+/** Рекомендации для главной: персональные треки + артисты; холодный старт — чарт. */
+async function recommendations(userId, limit = 18) {
+  const engine = await recommendationEngine(userId);
+  const tracks = engine.tracks.slice(0, limit);
+
+  if (tracks.length < limit) {
+    const rated = ratedIdSet(userId, 'track');
+    const seen = new Set(tracks.map((t) => t.id));
+    try {
+      for (const track of normList(await dz.chartTracks(40), normTrack)) {
+        if (rated.has(track.id) || seen.has(track.id)) continue;
+        seen.add(track.id);
+        tracks.push({ ...track, reason: 'Сейчас в чарте', reasonArtist: null });
+        if (tracks.length >= limit) break;
+      }
+    } catch (err) {
+      log.debug('chart fallback failed', err.message);
+    }
+  }
+
+  return { tracks, artists: engine.artists.slice(0, 12), seeds: engine.seeds, hasSeeds: engine.hasSeeds };
+}
+
 const DISCOVER_GENRES = [132, 116, 152, 113, 165, 85, 106, 129, 464, 153];
 
-/** Discover: подборка «новых находок», которых у пользователя ещё нет. */
+/**
+ * Discover: ~60 % персональных находок (движок подборок) + ~40 % новизны
+ * (выбор редакции, чарт, случайная жанровая волна). Всё — с превью.
+ */
 async function discover(userId, limit = 12) {
   const rated = ratedIdSet(userId, 'track');
-  const pool = [];
   const seen = new Set();
+  const personal = [];
+  const fresh = [];
 
-  const push = (tracks, reason) => {
+  const push = (target, tracks, reason) => {
     for (const track of tracks) {
-      if (!track || rated.has(track.id) || seen.has(track.id)) continue;
+      if (!track || !track.preview || rated.has(track.id) || seen.has(track.id)) continue;
       seen.add(track.id);
-      pool.push({ ...track, reason });
+      target.push({ ...track, reason: track.reason || reason });
     }
   };
 
-  const tasks = [
-    dz.editorialSelection(30).then((r) => push(normList(r, normTrack), 'Выбор редакции')).catch(() => {}),
-    dz.chartTracks(40).then((r) => push(normList(r, normTrack), 'Мировой чарт')).catch(() => {})
-  ];
+  try {
+    const engine = await recommendationEngine(userId);
+    push(personal, shuffle(engine.tracks), 'В твоём вкусе');
+  } catch (err) {
+    log.debug('discover: engine failed', err.message);
+  }
 
   const genreId = DISCOVER_GENRES[Math.floor(Math.random() * DISCOVER_GENRES.length)];
-  tasks.push(
+  await Promise.all([
+    dz.editorialSelection(30).then((r) => push(fresh, shuffle(normList(r, normTrack)), 'Выбор редакции')).catch(() => {}),
+    dz.chartTracks(40).then((r) => push(fresh, shuffle(normList(r, normTrack)), 'Мировой чарт')).catch(() => {}),
     dz.genreArtists(genreId, 12)
       .then(async (res) => {
-        const artists = shuffle(normList(res, normArtist)).slice(0, 3);
-        for (const artist of artists) {
+        for (const artist of shuffle(normList(res, normArtist)).slice(0, 3)) {
           try {
-            const top = await dz.artistTop(artist.id, 5);
-            push(normList(top, normTrack), 'Из жанровой волны');
+            push(fresh, normList(await dz.artistTop(artist.id, 5), normTrack), 'Жанровая волна');
           } catch {
             /* ignore */
           }
         }
       })
       .catch(() => {})
-  );
+  ]);
 
-  await Promise.all(tasks);
-
-  const favouriteArtists = db.prepare(`
-    SELECT artist_id FROM ratings WHERE user_id = ? AND artist_id IS NOT NULL
-    GROUP BY artist_id ORDER BY AVG(final_score) DESC LIMIT 2
-  `).all(userId);
-
-  for (const row of favouriteArtists) {
-    try {
-      const related = await dz.artistRelated(row.artist_id, 4);
-      const artists = normList(related, normArtist);
-      for (const artist of artists.slice(0, 2)) {
-        const top = await dz.artistTop(artist.id, 4);
-        push(normList(top, normTrack), 'В твоём вкусе');
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  return shuffle(pool.filter((t) => t.preview)).slice(0, limit);
+  const personalCount = Math.min(personal.length, Math.ceil(limit * 0.6));
+  const picks = personal.slice(0, personalCount).concat(shuffle(fresh).slice(0, limit - personalCount));
+  return shuffle(picks).slice(0, limit);
 }
 
-/** Новые релизы (альбомы). */
+/** Новые релизы (альбомы) — обновляются в 00:00 по часовому поясу сервиса. */
 async function newReleases(limit = 20) {
   try {
     const res = await dz.editorialReleases(limit);
@@ -2109,6 +2391,49 @@ async function newReleases(limit = 20) {
     log.debug('new releases failed', err.message);
     return [];
   }
+}
+
+/* --- ежедневное обновление подборок ---------------------------------------- */
+
+let dailyTimer = null;
+let lastDailyRefresh = toInt(getSetting('daily_refreshed_at'), 0);
+
+async function refreshDailyContent(trigger = 'schedule') {
+  log.info(`Обновляю ежедневные подборки (${trigger}, 00:00 ${CFG.timezone})`);
+  for (const key of [...memCache.keys()]) {
+    if (key.includes('/chart/') || key.includes('/editorial/') || key.startsWith('reco:')) memCache.delete(key);
+  }
+  db.prepare("DELETE FROM api_cache WHERE key LIKE 'dz:/chart/%' OR key LIKE 'dz:/editorial/%' OR key LIKE 'reco:%'").run();
+  await Promise.allSettled([dz.chartTracks(30), dz.chartAlbums(30), dz.editorialReleases(30), dz.editorialSelection(30)]);
+  lastDailyRefresh = now();
+  setSetting('daily_refreshed_at', lastDailyRefresh);
+  logEvent(null, 'daily_refresh', { trigger, timezone: CFG.timezone, dateKey: localDateKey() });
+}
+
+function scheduleDailyRefresh() {
+  if (dailyTimer) clearTimeout(dailyTimer);
+  const delayMs = secondsUntilMidnight() * 1000 + 2000;
+  dailyTimer = setTimeout(async () => {
+    try {
+      await refreshDailyContent('schedule');
+    } catch (err) {
+      log.warn('daily refresh failed:', err.message);
+    }
+    scheduleDailyRefresh();
+  }, delayMs);
+  dailyTimer.unref();
+  log.info(`Подборки обновятся через ${Math.round(delayMs / 60000)} мин — в 00:00 ${CFG.timezone}`);
+}
+
+function dailyInfo() {
+  return {
+    timezone: CFG.timezone,
+    dateKey: localDateKey(),
+    localTime: localTimeString(),
+    refreshAt: '00:00',
+    nextRefreshInSec: secondsUntilMidnight(),
+    lastRefreshAt: lastDailyRefresh || null
+  };
 }
 
 /* =============================================================================
@@ -2626,6 +2951,20 @@ async function handleCommand(message, command, args) {
       });
     }
 
+    case 'admin': {
+      if (!isAdmin(userId)) return tg.sendMessage(chatId, `${em('stop')} Эта команда только для администраторов.`);
+      const o = adminOverview();
+      return tg.sendMessage(chatId, [
+        `${em('shield')} <b>Админ-панель Dreinn Music</b>`,
+        '',
+        `${em('people')} Пользователей: <b>${o.users.total}</b> (+${o.users.today} сегодня, активных за неделю ${o.users.activeWeek})`,
+        `${em('chart')} Оценок: <b>${o.ratings.total}</b> (+${o.ratings.today} сегодня) · средняя ${o.ratings.avg}`,
+        `${em('link')} Spotify: <b>${o.spotify.enabled ? 'настроен (' + o.spotify.source + ')' : 'не настроен'}</b> · подключено аккаунтов: ${o.spotify.accounts}`,
+        `${em('clock')} Подборки обновляются в 00:00 ${escapeHtml(o.daily.timezone)} (сейчас ${o.daily.localTime})`,
+        `${em('robot')} Бот: ${o.bot.mode}, custom emoji ${o.bot.customEmoji ? 'вкл' : 'выкл'}${o.bot.customEmojiBlocked ? ' (Telegram отклонил)' : ''}`
+      ].join('\n'), { reply_markup: { inline_keyboard: [[webAppButton('Открыть админ-панель', 'admin')]] } });
+    }
+
     case 'about':
       return tg.sendMessage(chatId, [
         `${em('duckCool')} <b>Dreinn Music</b>`,
@@ -2648,6 +2987,12 @@ async function handleMessage(message) {
   if (!text) return;
 
   const user = upsertUser(message.from);
+  if (user && user.is_banned) return;
+
+  const maintenance = getSetting('maintenance');
+  if (maintenance && maintenance.enabled && !isAdmin(user.id)) {
+    return tg.sendMessage(chatId, `${em('clock')} ${escapeHtml(maintenance.message || 'Сервис на техническом обслуживании, скоро вернёмся.')}`);
+  }
 
   if (text.startsWith('/')) {
     const match = text.match(/^\/([a-zA-Z_]+)(?:@\w+)?\s*([\s\S]*)$/);
@@ -2814,6 +3159,35 @@ async function startWebhook() {
  * 11. HTTP-СЕРВЕР: Mini App + API
  * ========================================================================== */
 
+/** Хэш содержимого клиентских файлов — подставляется в ?v= у скриптов и стилей. */
+function computeAssetVersion() {
+  const hash = crypto.createHash('sha1');
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(js|css|html)$/i.test(entry.name)) {
+        try {
+          hash.update(entry.name);
+          hash.update(fs.readFileSync(full));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  };
+  walk(path.join(__dirname, 'public'));
+  return hash.digest('hex').slice(0, 10);
+}
+
+const ASSET_VERSION = computeAssetVersion();
+
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
@@ -2919,7 +3293,7 @@ function authMiddleware(req, res, next) {
     req.tgUser = parsed.user;
     req.startParam = parsed.startParam;
     req.user = upsertUser(parsed.user);
-    return next();
+    return guardUser(req, res, next);
   }
 
   // не спамим лог: одно предупреждение раз в 10 секунд
@@ -2938,7 +3312,7 @@ function authMiddleware(req, res, next) {
       language_code: 'ru'
     });
     req.devMode = true;
-    return next();
+    return guardUser(req, res, next);
   }
 
   return res.status(401).json({
@@ -2946,6 +3320,19 @@ function authMiddleware(req, res, next) {
     reason: parsed.reason,
     message: AUTH_HINTS[parsed.reason] || 'Открой приложение через Telegram'
   });
+}
+
+/** Бан и режим обслуживания — после того как пользователь определён. */
+function guardUser(req, res, next) {
+  req.isAdmin = isAdmin(req.user.id);
+  if (req.user.is_banned) {
+    return res.status(403).json({ error: 'banned', message: req.user.banned_reason || 'Доступ к сервису ограничен.' });
+  }
+  const maintenance = getSetting('maintenance');
+  if (maintenance && maintenance.enabled && !req.isAdmin) {
+    return res.status(503).json({ error: 'maintenance', message: maintenance.message || 'Сервис на техническом обслуживании, скоро вернёмся.' });
+  }
+  return next();
 }
 
 const wrap = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -2967,7 +3354,8 @@ api.get('/bootstrap', wrap(async (req, res) => {
       photo: user.photo_url,
       isPremium: Boolean(user.is_premium),
       bio: user.bio,
-      createdAt: user.created_at
+      createdAt: user.created_at,
+      isAdmin: Boolean(req.isAdmin)
     },
     config: {
       appName: 'Dreinn Music',
@@ -2985,8 +3373,11 @@ api.get('/bootstrap', wrap(async (req, res) => {
       tiers: TIERS,
       spotifyEnabled: CFG.spotifyEnabled,
       botUsername: CFG.botUsername,
-      devMode: Boolean(req.devMode)
+      devMode: Boolean(req.devMode),
+      timezone: CFG.timezone,
+      assetVersion: ASSET_VERSION
     },
+    daily: dailyInfo(),
     spotify: spotify.status(user.id),
     stats: {
       total: stats.totals.total,
@@ -3120,9 +3511,10 @@ api.get('/artist/:id', wrap(async (req, res) => {
 
 api.get('/home', wrap(async (req, res) => {
   const userId = req.user.id;
-  const [chart, releases] = await Promise.all([
+  const [chart, releases, recos] = await Promise.all([
     dz.chartTracks(20).then((r) => normList(r, normTrack)).catch(() => []),
-    newReleases(15)
+    newReleases(15),
+    recommendations(userId, 14).catch(() => ({ tracks: [], artists: [], seeds: { artists: [], genres: [] }, hasSeeds: false }))
   ]);
 
   const ratedTracks = ratedIdSet(userId, 'track');
@@ -3132,6 +3524,11 @@ api.get('/home', wrap(async (req, res) => {
     greeting: greetingFor(req.user),
     chart: chart.map((t) => ({ ...t, rated: ratedTracks.has(t.id) })),
     releases,
+    recommended: recos.tracks,
+    artistsForYou: recos.artists.slice(0, 10),
+    seeds: recos.seeds,
+    hasSeeds: recos.hasSeeds,
+    daily: dailyInfo(),
     recent: stats.recent,
     best: stats.best,
     stats: {
@@ -3152,7 +3549,7 @@ api.get('/home', wrap(async (req, res) => {
 }));
 
 function greetingFor(user) {
-  const hour = new Date().getHours();
+  const hour = tzParts().hour;
   const part = hour < 5 ? 'Доброй ночи' : hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер';
   return `${part}, ${user.first_name || 'слушатель'}`;
 }
@@ -3163,8 +3560,8 @@ api.get('/discover', wrap(async (req, res) => {
 }));
 
 api.get('/recommendations', wrap(async (req, res) => {
-  const items = await recommendations(req.user.id, Math.min(30, toInt(req.query.limit, 18)));
-  res.json({ items, hasSeeds: db.prepare('SELECT COUNT(*) AS c FROM ratings WHERE user_id = ?').get(req.user.id).c > 0 });
+  const recos = await recommendations(req.user.id, Math.min(30, toInt(req.query.limit, 18)));
+  res.json({ items: recos.tracks, artists: recos.artists, seeds: recos.seeds, hasSeeds: recos.hasSeeds });
 }));
 
 /* --- оценки ---------------------------------------------------------------- */
@@ -3478,6 +3875,349 @@ api.post('/spotify/export', wrap(async (req, res) => {
   res.json({ playlist: spotify.normPlaylist(playlist), exported: uris.length, requested: tracks.length });
 }));
 
+/* --- админ-панель ---------------------------------------------------------- */
+
+function adminOnly(req, res, next) {
+  if (!req.isAdmin) return res.status(403).json({ error: 'forbidden', message: 'Только для администраторов' });
+  return next();
+}
+
+const admin = express.Router();
+admin.use(adminOnly);
+
+function dbFileSize() {
+  let total = 0;
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      total += fs.statSync(DB_FILE + suffix).size;
+    } catch {
+      /* ignore */
+    }
+  }
+  return total;
+}
+
+function adminOverview() {
+  const dayStart = localDayStart();
+  const weekAgo = now() - 7 * 86400;
+  const count = (sql, ...params) => toInt(db.prepare(sql).get(...params).c, 0);
+
+  const ratingsRow = db.prepare('SELECT COUNT(*) AS c, AVG(final_score) AS avg FROM ratings').get();
+
+  return {
+    users: {
+      total: count('SELECT COUNT(*) AS c FROM users'),
+      today: count('SELECT COUNT(*) AS c FROM users WHERE created_at >= ?', dayStart),
+      week: count('SELECT COUNT(*) AS c FROM users WHERE created_at >= ?', weekAgo),
+      activeToday: count('SELECT COUNT(*) AS c FROM users WHERE last_seen >= ?', dayStart),
+      activeWeek: count('SELECT COUNT(*) AS c FROM users WHERE last_seen >= ?', weekAgo),
+      banned: count('SELECT COUNT(*) AS c FROM users WHERE is_banned = 1'),
+      premium: count('SELECT COUNT(*) AS c FROM users WHERE is_premium = 1')
+    },
+    ratings: {
+      total: toInt(ratingsRow.c, 0),
+      avg: round1(ratingsRow.avg || 0),
+      today: count('SELECT COUNT(*) AS c FROM ratings WHERE updated_at >= ?', dayStart),
+      week: count('SELECT COUNT(*) AS c FROM ratings WHERE updated_at >= ?', weekAgo),
+      tracks: count("SELECT COUNT(*) AS c FROM ratings WHERE item_type = 'track'"),
+      albums: count("SELECT COUNT(*) AS c FROM ratings WHERE item_type = 'album'"),
+      reviews: count("SELECT COUNT(*) AS c FROM ratings WHERE LENGTH(COALESCE(review, '')) > 0")
+    },
+    library: {
+      favorites: count('SELECT COUNT(*) AS c FROM favorites'),
+      collections: count('SELECT COUNT(*) AS c FROM collections'),
+      spotifyImports: count("SELECT COUNT(*) AS c FROM collections WHERE source = 'spotify'")
+    },
+    spotify: {
+      enabled: CFG.spotifyEnabled,
+      source: CFG.spotifySource,
+      clientId: CFG.spotifyClientId ? CFG.spotifyClientId.slice(0, 6) + '…' + CFG.spotifyClientId.slice(-4) : null,
+      redirectUri: CFG.spotifyRedirectUri,
+      accounts: count('SELECT COUNT(*) AS c FROM spotify_accounts')
+    },
+    bot: {
+      enabled: CFG.botEnabled,
+      mode: CFG.botEnabled ? CFG.botMode : 'disabled',
+      username: CFG.botUsername || (tg.me && tg.me.username) || null,
+      customEmoji: CFG.useCustomEmoji,
+      customEmojiBlocked: tg.customEmojiBlocked
+    },
+    daily: dailyInfo(),
+    server: {
+      version: '1.1.0',
+      node: process.version,
+      uptimeSec: Math.round(process.uptime()),
+      publicUrl: CFG.publicUrl,
+      devMode: CFG.devMode,
+      dbBytes: dbFileSize(),
+      memCacheEntries: memCache.size,
+      dbCacheEntries: count('SELECT COUNT(*) AS c FROM api_cache'),
+      adminIds: CFG.adminIds
+    },
+    maintenance: getSetting('maintenance') || { enabled: false, message: '' }
+  };
+}
+
+admin.get('/overview', wrap(async (req, res) => {
+  const overview = adminOverview();
+  const recentRatings = db.prepare(`
+    SELECT r.title, r.artist, r.item_type, r.item_id, r.final_score, r.updated_at, r.cover,
+           u.id AS user_id, u.first_name, u.last_name, u.username
+    FROM ratings r JOIN users u ON u.id = r.user_id
+    ORDER BY r.updated_at DESC LIMIT 8
+  `).all().map((r) => ({
+    title: r.title, artist: r.artist, type: r.item_type, itemId: r.item_id, cover: r.cover,
+    score: round1(r.final_score), at: r.updated_at,
+    user: { id: r.user_id, name: displayName(r), username: r.username }
+  }));
+
+  res.json({
+    ...overview,
+    topUsers: userLeaderboard(6),
+    recentRatings,
+    broadcast: broadcastState
+  });
+}));
+
+admin.get('/settings', wrap(async (req, res) => {
+  const stored = getSetting('spotify') || {};
+  res.json({
+    spotify: {
+      enabled: CFG.spotifyEnabled,
+      source: CFG.spotifySource,
+      clientId: CFG.spotifyClientId || '',
+      secretMask: CFG.spotifyClientSecret ? '••••••••' + CFG.spotifyClientSecret.slice(-4) : '',
+      redirectUri: CFG.spotifyRedirectUri,
+      defaultRedirectUri: `${CFG.publicUrl}/spotify/callback`,
+      storedInDb: Boolean(stored.clientId),
+      envConfigured: Boolean(ENV_SPOTIFY.clientId && ENV_SPOTIFY.clientSecret)
+    },
+    useCustomEmoji: CFG.useCustomEmoji,
+    customEmojiBlocked: tg.customEmojiBlocked,
+    timezone: CFG.timezone,
+    timezoneFromEnv: (process.env.APP_TIMEZONE || 'Europe/Moscow').trim(),
+    maintenance: getSetting('maintenance') || { enabled: false, message: '' },
+    daily: dailyInfo()
+  });
+}));
+
+async function verifySpotifyCredentials(clientId, clientSecret) {
+  const auth = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const data = await fetchJson('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=client_credentials'
+  }, { timeout: 10000, retries: 0 });
+  return Boolean(data && data.access_token);
+}
+
+admin.post('/settings/spotify', wrap(async (req, res) => {
+  const body = req.body || {};
+  const clientId = String(body.clientId || '').trim();
+  const clientSecret = String(body.clientSecret || '').trim() || (getSetting('spotify') || {}).clientSecret || '';
+  const redirectUri = String(body.redirectUri || '').trim() || `${CFG.publicUrl}/spotify/callback`;
+
+  if (!clientId || !clientSecret) return res.status(400).json({ error: 'credentials_required', message: 'Нужны Client ID и Client Secret' });
+  if (!/^https?:\/\//.test(redirectUri)) return res.status(400).json({ error: 'bad_redirect', message: 'Redirect URI должен начинаться с http(s)://' });
+
+  try {
+    const ok = await verifySpotifyCredentials(clientId, clientSecret);
+    if (!ok) return res.status(400).json({ error: 'spotify_rejected', message: 'Spotify не принял ключи' });
+  } catch (err) {
+    const desc = err.body && (err.body.error_description || err.body.error);
+    return res.status(400).json({ error: 'spotify_rejected', message: 'Spotify отклонил ключи: ' + (desc || err.message) });
+  }
+
+  setSetting('spotify', { clientId, clientSecret, redirectUri, updatedBy: req.user.id });
+  applyStoredSettings();
+  logEvent(req.user.id, 'admin_spotify_updated', { clientId: clientId.slice(0, 6) + '…' });
+  res.json({ ok: true, enabled: CFG.spotifyEnabled, source: CFG.spotifySource, redirectUri: CFG.spotifyRedirectUri });
+}));
+
+admin.delete('/settings/spotify', wrap(async (req, res) => {
+  deleteSetting('spotify');
+  applyStoredSettings();
+  logEvent(req.user.id, 'admin_spotify_reset');
+  res.json({ ok: true, enabled: CFG.spotifyEnabled, source: CFG.spotifySource, redirectUri: CFG.spotifyRedirectUri });
+}));
+
+admin.post('/settings', wrap(async (req, res) => {
+  const body = req.body || {};
+  const changed = [];
+
+  if (body.useCustomEmoji !== undefined) {
+    setSetting('use_custom_emoji', Boolean(body.useCustomEmoji));
+    if (body.useCustomEmoji) tg.customEmojiBlocked = false;
+    changed.push('use_custom_emoji');
+  }
+
+  if (body.timezone !== undefined) {
+    const tz = String(body.timezone || '').trim();
+    if (!validTimezone(tz)) return res.status(400).json({ error: 'bad_timezone', message: 'Часовой пояс не распознан (пример: Europe/Moscow)' });
+    setSetting('timezone', tz);
+    changed.push('timezone');
+  }
+
+  if (body.maintenance !== undefined) {
+    const m = body.maintenance || {};
+    setSetting('maintenance', { enabled: Boolean(m.enabled), message: String(m.message || '').slice(0, 300) });
+    changed.push('maintenance');
+  }
+
+  applyStoredSettings();
+  if (changed.includes('timezone')) scheduleDailyRefresh();
+  logEvent(req.user.id, 'admin_settings_updated', { changed });
+  res.json({ ok: true, changed, useCustomEmoji: CFG.useCustomEmoji, timezone: CFG.timezone, maintenance: getSetting('maintenance'), daily: dailyInfo() });
+}));
+
+admin.post('/cache/clear', wrap(async (req, res) => {
+  memCache.clear();
+  const removed = db.prepare('DELETE FROM api_cache').run().changes;
+  logEvent(req.user.id, 'admin_cache_cleared', { removed });
+  res.json({ ok: true, removed });
+}));
+
+admin.post('/daily/refresh', wrap(async (req, res) => {
+  await refreshDailyContent('admin');
+  res.json({ ok: true, daily: dailyInfo() });
+}));
+
+admin.get('/users', wrap(async (req, res) => {
+  const query = String(req.query.q || '').trim().toLowerCase();
+  const like = `%${query}%`;
+  const rows = db.prepare(`
+    SELECT u.*,
+           (SELECT COUNT(*) FROM ratings r WHERE r.user_id = u.id) AS ratings,
+           (SELECT AVG(final_score) FROM ratings r WHERE r.user_id = u.id) AS avg_final,
+           (SELECT 1 FROM spotify_accounts s WHERE s.user_id = u.id) AS spotify
+    FROM users u
+    WHERE ? = '' OR LOWER(COALESCE(u.username, '')) LIKE ? OR LOWER(COALESCE(u.first_name, '')) LIKE ?
+          OR LOWER(COALESCE(u.last_name, '')) LIKE ? OR CAST(u.id AS TEXT) = ?
+    ORDER BY u.last_seen DESC LIMIT 60
+  `).all(query, like, like, like, query);
+
+  res.json({
+    items: rows.map((u) => ({
+      id: u.id,
+      name: displayName(u),
+      username: u.username,
+      photo: u.photo_url,
+      isPremium: Boolean(u.is_premium),
+      isBanned: Boolean(u.is_banned),
+      bannedReason: u.banned_reason,
+      isAdmin: isAdmin(u.id),
+      ratings: u.ratings,
+      avg: round1(u.avg_final || 0),
+      spotify: Boolean(u.spotify),
+      createdAt: u.created_at,
+      lastSeen: u.last_seen
+    }))
+  });
+}));
+
+admin.post('/users/:id/ban', wrap(async (req, res) => {
+  const targetId = toInt(req.params.id, 0);
+  if (!targetId) return res.status(400).json({ error: 'bad_user' });
+  if (isAdmin(targetId)) return res.status(400).json({ error: 'cannot_ban_admin', message: 'Администратора забанить нельзя' });
+  const banned = Boolean(req.body && req.body.banned);
+  const reason = String((req.body && req.body.reason) || '').slice(0, 200);
+  db.prepare('UPDATE users SET is_banned = ?, banned_reason = ? WHERE id = ?').run(banned ? 1 : 0, banned ? reason || null : null, targetId);
+  logEvent(req.user.id, banned ? 'admin_user_banned' : 'admin_user_unbanned', { targetId, reason });
+  res.json({ ok: true, banned });
+}));
+
+admin.delete('/users/:id/ratings', wrap(async (req, res) => {
+  const targetId = toInt(req.params.id, 0);
+  const removed = db.prepare('DELETE FROM ratings WHERE user_id = ?').run(targetId).changes;
+  logEvent(req.user.id, 'admin_user_ratings_deleted', { targetId, removed });
+  res.json({ ok: true, removed });
+}));
+
+admin.get('/events', wrap(async (req, res) => {
+  const rows = db.prepare(`
+    SELECT e.*, u.first_name, u.last_name, u.username
+    FROM events e LEFT JOIN users u ON u.id = e.user_id
+    ORDER BY e.id DESC LIMIT ?
+  `).all(Math.min(200, toInt(req.query.limit, 40)));
+  res.json({
+    items: rows.map((e) => {
+      let payload = null;
+      try {
+        payload = e.payload ? JSON.parse(e.payload) : null;
+      } catch {
+        payload = null;
+      }
+      return { id: e.id, kind: e.kind, payload, at: e.created_at, user: e.user_id ? { id: e.user_id, name: displayName(e) } : null };
+    })
+  });
+}));
+
+admin.get('/bot', wrap(async (req, res) => {
+  if (!CFG.botEnabled) return res.json({ enabled: false });
+  const [me, webhook] = await Promise.all([
+    tg.api('getMe').catch((err) => ({ error: err.message })),
+    tg.api('getWebhookInfo').catch((err) => ({ error: err.message }))
+  ]);
+  res.json({
+    enabled: true,
+    mode: CFG.botMode,
+    me: me.result || me,
+    webhook: webhook.result || webhook,
+    miniAppUrl: miniAppUrl(),
+    customEmoji: CFG.useCustomEmoji,
+    customEmojiBlocked: tg.customEmojiBlocked
+  });
+}));
+
+admin.post('/bot/setup', wrap(async (req, res) => {
+  if (!CFG.botEnabled) return res.status(400).json({ error: 'bot_disabled' });
+  await setupBotProfile();
+  logEvent(req.user.id, 'admin_bot_setup');
+  res.json({ ok: true });
+}));
+
+/* рассылка */
+
+let broadcastState = { running: false, total: 0, sent: 0, failed: 0, startedAt: null, finishedAt: null, preview: '' };
+
+async function runBroadcast(text, adminId) {
+  const users = db.prepare('SELECT id FROM users WHERE is_banned = 0 ORDER BY last_seen DESC').all();
+  broadcastState = { running: true, total: users.length, sent: 0, failed: 0, startedAt: now(), finishedAt: null, preview: text.slice(0, 80) };
+  for (const u of users) {
+    try {
+      await tg.sendMessage(u.id, text);
+      broadcastState.sent += 1;
+    } catch {
+      broadcastState.failed += 1;
+    }
+    await new Promise((r) => setTimeout(r, 70)); // ~14 сообщений/с — с запасом до лимита Telegram
+  }
+  broadcastState.running = false;
+  broadcastState.finishedAt = now();
+  logEvent(adminId, 'admin_broadcast', { total: users.length, sent: broadcastState.sent, failed: broadcastState.failed });
+}
+
+admin.post('/broadcast', wrap(async (req, res) => {
+  if (!CFG.botEnabled) return res.status(400).json({ error: 'bot_disabled', message: 'Бот выключен — рассылать некому' });
+  const body = req.body || {};
+  const raw = String(body.text || '').trim();
+  if (!raw) return res.status(400).json({ error: 'text_required', message: 'Введите текст' });
+  const text = `${em('duck')} ${raw}`;
+
+  if (body.testOnly) {
+    await tg.sendMessage(req.user.id, text);
+    return res.json({ ok: true, test: true });
+  }
+  if (broadcastState.running) return res.status(409).json({ error: 'broadcast_running', message: 'Предыдущая рассылка ещё идёт' });
+
+  runBroadcast(text, req.user.id).catch((err) => log.error('broadcast failed:', err.message));
+  res.json({ ok: true, started: true, state: broadcastState });
+}));
+
+admin.get('/broadcast', (req, res) => res.json(broadcastState));
+
+api.use('/admin', admin);
+
 app.use('/api', api);
 
 /* --- webhook Telegram (регистрируется до статики и catch-all) ------------- */
@@ -3569,7 +4309,7 @@ app.get('/healthz', (req, res) => {
   res.json({
     ok: true,
     app: 'dreinn-music',
-    version: '1.0.0',
+    version: '1.1.0',
     uptime: Math.round(process.uptime()),
     bot: CFG.botEnabled ? CFG.botMode : 'disabled',
     spotify: CFG.spotifyEnabled,
@@ -3578,18 +4318,39 @@ app.get('/healthz', (req, res) => {
   });
 });
 
+/* --- Mini App: index.html с версией статики -------------------------------
+ * В URL скриптов и стилей подставляется хэш их содержимого, поэтому WebView
+ * Telegram не может показать старый app.js после обновления образа. */
+
+const INDEX_HTML_PATH = path.join(__dirname, 'public', 'index.html');
+let indexHtmlCache = null;
+
+function renderIndexHtml() {
+  if (indexHtmlCache && process.env.NODE_ENV === 'production') return indexHtmlCache;
+  const html = fs.readFileSync(INDEX_HTML_PATH, 'utf8').replace(/__ASSET_VERSION__/g, ASSET_VERSION);
+  indexHtmlCache = html;
+  return html;
+}
+
+function sendIndex(req, res) {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.type('html').send(renderIndexHtml());
+}
+
+app.get(['/', '/index.html'], sendIndex);
+
 app.use(express.static(path.join(__dirname, 'public'), {
-  maxAge: '7d',
+  index: false,
+  maxAge: '30d',
   setHeaders(res, filePath) {
-    // разметку и код клиента всегда перепроверяем по ETag, иначе после обновления
-    // приложения у пользователей неделю живёт старый Mini App
+    // код клиента тоже перепроверяем по ETag — на случай запроса без ?v=
     if (/\.(html|js|css)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
   }
 }));
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next();
-  return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  return sendIndex(req, res);
 });
 
 app.use((req, res) => res.status(404).json({ error: 'not_found' }));
@@ -3620,9 +4381,14 @@ async function bootstrap() {
     log.info(`HTTP слушает ${CFG.host}:${CFG.port}`);
     log.info(`Публичный адрес: ${CFG.publicUrl}`);
     log.info(`База данных: ${path.resolve(CFG.dbPath)}`);
-    log.info(`Spotify: ${CFG.spotifyEnabled ? 'включён (' + CFG.spotifyRedirectUri + ')' : 'выключен'}`);
+    log.info(`Spotify: ${CFG.spotifyEnabled ? 'включён (' + CFG.spotifySource + ', ' + CFG.spotifyRedirectUri + ')' : 'выключен'}`);
+    log.info(`Часовой пояс: ${CFG.timezone} (сейчас ${localTimeString()}), версия статики ${ASSET_VERSION}`);
+    if (CFG.adminIds.length) log.info(`Администраторы: ${CFG.adminIds.join(', ')}`);
+    else log.warn('ADMIN_IDS пуст — админ-панель никому не доступна');
     if (CFG.devMode) log.warn('DEV_MODE=true — Mini App доступен без Telegram initData');
   });
+
+  scheduleDailyRefresh();
 
   if (!CFG.botEnabled) {
     log.warn('BOT_TOKEN не задан — бот выключен, работает только Mini App/API');
@@ -3673,5 +4439,8 @@ module.exports = {
   validateInitData,
   em,
   stripCustomEmoji,
-  botText: { welcomeText, helpText, scoringText, profileText, statsText, topText, ratingCardText }
+  botText: { welcomeText, helpText, scoringText, profileText, statsText, topText, ratingCardText },
+  time: { tzParts, localDateKey, secondsUntilMidnight, localDayStart, tzOffsetSeconds, validTimezone },
+  settings: { getSetting, setSetting, deleteSetting, applyStoredSettings },
+  adminOverview
 };

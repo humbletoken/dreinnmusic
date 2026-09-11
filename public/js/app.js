@@ -248,10 +248,13 @@
       .catch(function (err) {
         console.error('bootstrap failed', err);
         var reason = err && err.payload && err.payload.message;
+        var status = err && err.status;
         appRoot.innerHTML = errorScreen(
-          err && err.status === 401
+          status === 401
             ? (reason || 'Приложение открывается только внутри Telegram. Запусти его через бота.')
-            : 'Сервер недоступен. Попробуй ещё раз через минуту.'
+            : status === 403 || status === 503
+              ? (reason || 'Доступ временно закрыт.')
+              : 'Сервер недоступен. Попробуй ещё раз через минуту.'
         );
         global.Icons.hydrate(appRoot);
       });

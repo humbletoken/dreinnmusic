@@ -152,6 +152,9 @@
               ? menuItem('spotify', 'brand-spotify', 'Spotify', global.STATE.spotify && global.STATE.spotify.connected ? 'Подключён' : 'Подключить аккаунт')
               : '') +
             menuItem('scoring', 'gauge', 'Система оценок', 'Как считается Dreinn Score') +
+            (global.STATE.user && global.STATE.user.isAdmin
+              ? menuItem('admin', 'shield', 'Админ-панель', 'Spotify, настройки, пользователи, рассылка')
+              : '') +
             '</div></div>';
         }
 

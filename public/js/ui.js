@@ -91,16 +91,21 @@
     var offset = circumference * (1 - value / max);
     var tier = opts.tier || tierOf(value);
 
+    // типографика масштабируется вместе с кольцом, чтобы ничего не вылезало
+    var numSize = Math.round(size * 0.235);
+    var smallSize = Math.max(9, Math.round(size * 0.085));
+    var tierSize = Math.max(9, Math.round(size * 0.08));
+
     return (
-      '<div class="score-ring" style="width:' + size + 'px;height:' + size + 'px">' +
+      '<div class="score-ring" style="width:' + size + 'px;height:' + size + 'px;flex:none">' +
         '<svg viewBox="0 0 148 148">' +
           '<circle class="track-arc" cx="74" cy="74" r="' + radius + '"></circle>' +
           '<circle class="value-arc" cx="74" cy="74" r="' + radius + '" ' +
             'style="stroke:' + (tier.color || 'var(--accent)') + ';stroke-dasharray:' + circumference + ';stroke-dashoffset:' + offset + '"></circle>' +
         '</svg>' +
         '<div class="center">' +
-          '<div class="num">' + fmtScore(value) + '<small>/' + max + '</small></div>' +
-          '<div class="tier-name">' + esc(tier.label || '') + '</div>' +
+          '<div class="num" style="font-size:' + numSize + 'px">' + fmtScore(value) + '<small style="font-size:' + smallSize + 'px">/' + max + '</small></div>' +
+          '<div class="tier-name" style="font-size:' + tierSize + 'px">' + esc(tier.label || '') + '</div>' +
         '</div>' +
       '</div>'
     );

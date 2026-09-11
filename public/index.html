@@ -10,8 +10,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Unbounded:wght@600;700;800&display=swap">
-  <link rel="stylesheet" href="/css/app.css">
+        href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700;800;900&family=Caveat:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="/css/app.css?v=__ASSET_VERSION__">
   <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -22,15 +22,15 @@
     <div class="screen" id="boot-screen">
       <div class="screen-head">
         <div class="title-block">
-          <div class="sk" style="width:60%;height:24px;border-radius:9px"></div>
-          <div class="sk" style="width:40%;height:12px;border-radius:7px;margin-top:8px"></div>
+          <div class="sk" style="width:60%;height:26px;border-radius:10px"></div>
+          <div class="sk" style="width:40%;height:14px;border-radius:7px;margin-top:8px"></div>
         </div>
       </div>
-      <div class="sk" style="height:150px;border-radius:34px;margin-bottom:22px"></div>
+      <div class="sk" style="height:150px;border-radius:28px;margin-bottom:22px"></div>
       <div class="stat-strip">
-        <div class="sk" style="height:62px;border-radius:20px"></div>
-        <div class="sk" style="height:62px;border-radius:20px"></div>
-        <div class="sk" style="height:62px;border-radius:20px"></div>
+        <div class="sk" style="height:66px;border-radius:20px"></div>
+        <div class="sk" style="height:66px;border-radius:20px"></div>
+        <div class="sk" style="height:66px;border-radius:20px"></div>
       </div>
       <div class="sk-row"><div class="sk sk-cover"></div><div class="sk-lines"><div class="sk sk-line" style="width:70%"></div><div class="sk sk-line" style="width:45%"></div></div></div>
       <div class="sk-row"><div class="sk sk-cover"></div><div class="sk-lines"><div class="sk sk-line" style="width:60%"></div><div class="sk sk-line" style="width:38%"></div></div></div>
@@ -54,23 +54,23 @@
   <!-- нижняя навигация -->
   <nav class="bottom-nav" id="bottom-nav">
     <button class="nav-item on" data-nav="home">
-      <span class="dot-wrap"><span data-icon="house" data-size="21"></span></span>
+      <span class="dot-wrap"><span data-icon="house" data-size="21" data-stroke="2.2"></span></span>
       <span>Главная</span>
     </button>
     <button class="nav-item" data-nav="search">
-      <span class="dot-wrap"><span data-icon="search" data-size="21"></span></span>
+      <span class="dot-wrap"><span data-icon="search" data-size="21" data-stroke="2.2"></span></span>
       <span>Поиск</span>
     </button>
     <button class="nav-item" data-nav="discover">
-      <span class="dot-wrap"><span data-icon="compass" data-size="21"></span></span>
+      <span class="dot-wrap"><span data-icon="compass" data-size="21" data-stroke="2.2"></span></span>
       <span>Discover</span>
     </button>
     <button class="nav-item" data-nav="charts">
-      <span class="dot-wrap"><span data-icon="trophy" data-size="21"></span></span>
+      <span class="dot-wrap"><span data-icon="trophy" data-size="21" data-stroke="2.2"></span></span>
       <span>Рейтинг</span>
     </button>
     <button class="nav-item" data-nav="profile">
-      <span class="dot-wrap"><span data-icon="circle-user" data-size="21"></span></span>
+      <span class="dot-wrap"><span data-icon="circle-user" data-size="21" data-stroke="2.2"></span></span>
       <span>Профиль</span>
     </button>
   </nav>
@@ -84,13 +84,14 @@
 
   <audio id="audio" preload="none" playsinline></audio>
 
-  <script src="/js/icons.js"></script>
-  <script src="/js/api.js"></script>
-  <script src="/js/ui.js"></script>
-  <script src="/js/player.js"></script>
-  <script src="/js/views.js"></script>
-  <script src="/js/views-rate.js"></script>
-  <script src="/js/views-profile.js"></script>
-  <script src="/js/app.js"></script>
+  <script src="/js/icons.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/api.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/ui.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/player.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/views.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/views-rate.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/views-profile.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/views-admin.js?v=__ASSET_VERSION__"></script>
+  <script src="/js/app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

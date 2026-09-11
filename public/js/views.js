@@ -9,6 +9,14 @@
   var API = global.API;
   var Views = global.Views || {};
 
+  var TZ_LABELS = {
+    'Europe/Moscow': 'Москве', 'Europe/Kiev': 'Киеву', 'Europe/Kyiv': 'Киеву', 'Europe/Minsk': 'Минску',
+    'Asia/Almaty': 'Алматы', 'Asia/Tashkent': 'Ташкенту', 'Europe/London': 'Лондону', 'Europe/Berlin': 'Берлину',
+    'Asia/Yekaterinburg': 'Екатеринбургу', 'Asia/Novosibirsk': 'Новосибирску', 'Asia/Vladivostok': 'Владивостоку', 'UTC': 'UTC'
+  };
+
+  function tzLabel(tz) { return TZ_LABELS[tz] || tz; }
+
   function head(title, subtitle, options) {
     var opts = options || {};
     return (
@@ -39,21 +47,22 @@
     },
 
     render: function () {
-      return Promise.all([API.home(), API.recommendations().catch(function () { return { items: [] }; })])
-        .then(function (res) {
-          var data = res[0];
-          var recos = res[1].items || [];
+      return API.home()
+        .then(function (data) {
+          var recos = data.recommended || [];
+          var artists = data.artistsForYou || [];
           var stats = data.stats;
+          var seeds = data.seeds || { artists: [], genres: [] };
 
           var html = '<div class="screen">';
-          html += head(data.greeting, 'Оцени музыку по пяти факторам');
+          html += head(data.greeting, 'вот что происходит в твоей музыке');
 
           html +=
             '<div class="hero fade-in">' +
               '<h1>' + (stats.total ? 'Твой счёт растёт' : 'Начни свою коллекцию оценок') + '</h1>' +
-              '<p>' + (stats.total
-                ? 'Средний балл ' + UI.fmtScore(stats.avg) + ' из 90 · ' + UI.esc(stats.avgTier.label) + '. Ты — ' + UI.esc(stats.archetype.toLowerCase()) + '.'
-                : 'Четыре критерия дают базу до 75 баллов, вайб превращается в множитель ×0.80…×1.20. Максимум — 90.') + '</p>' +
+              '<div class="tagline">' + (stats.total
+                ? 'средний балл ' + UI.fmtScore(stats.avg) + ' из 90 — ' + UI.esc(stats.avgTier.label.toLowerCase()) + '. Ты — ' + UI.esc(stats.archetype.toLowerCase()) + '.'
+                : 'четыре критерия дают базу до 75 баллов, вайб — множитель ×0.80…×1.20. Максимум — 90.') + '</div>' +
               '<div style="display:flex;gap:10px">' +
                 '<button class="btn btn-primary" data-go="search">' + UI.icon('search', 17) + 'Найти трек</button>' +
                 '<button class="btn" data-go="scoring">' + UI.icon('circle-help', 17) + 'Как считаем</button>' +
@@ -78,9 +87,20 @@
           }
 
           if (recos.length) {
-            html += '<div class="section">' + UI.sectionHead('Может понравиться', 'wand-sparkles');
-            html += '<div class="hscroll">' + recos.slice(0, 12).map(function (t) {
+            var seedNames = (seeds.artists || []).slice(0, 3).map(function (a) { return a.name; });
+            html += '<div class="section">' + UI.sectionHead(data.hasSeeds ? 'Подобрано под твой вкус' : 'Может понравиться', 'wand-sparkles');
+            if (seedNames.length) {
+              html += '<div class="script" style="margin:-6px 0 10px">на основе оценок: ' + UI.esc(seedNames.join(', ')) + '</div>';
+            }
+            html += '<div class="hscroll">' + recos.slice(0, 14).map(function (t) {
               return UI.tile(t, { meta: t.reason || t.artist });
+            }).join('') + '</div></div>';
+          }
+
+          if (artists.length) {
+            html += '<div class="section">' + UI.sectionHead('Артисты для тебя', 'mic-vocal');
+            html += '<div class="hscroll">' + artists.slice(0, 10).map(function (a) {
+              return UI.tile(a, { meta: a.reason || (UI.fmtNumber(a.fans) + ' фанатов') });
             }).join('') + '</div></div>';
           }
 
@@ -90,7 +110,14 @@
           html += '<div class="section">' + UI.sectionHead('Новые релизы', 'calendar');
           html += '<div class="hscroll">' + (data.releases || []).slice(0, 14).map(function (a) {
             return UI.tile(a, { meta: a.artist });
-          }).join('') + '</div></div>';
+          }).join('') + '</div>';
+          if (data.daily) {
+            html +=
+              '<div class="pill-note" style="margin-top:6px">' + UI.icon('clock', 15) +
+              'Чарт и новинки обновляются в ' + UI.esc(data.daily.refreshAt) + ' по ' + UI.esc(tzLabel(data.daily.timezone)) +
+              ' · сейчас ' + UI.esc(data.daily.localTime) + '</div>';
+          }
+          html += '</div>';
 
           if (data.community && data.community.topTracks && data.community.topTracks.length) {
             html += '<div class="section">' + UI.sectionHead('Топ сообщества', 'trophy', 'рейтинги', 'charts');
